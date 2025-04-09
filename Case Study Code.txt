@@ -180,7 +180,7 @@ for k = 1:N
        EXforce(k,5)
     ];
 
-    % 更新状态：x(k+1) = A*x(k) + B*u(k)
+    % update x(k+1) = A*x(k) + B*u(k)
     x1 = A*x1 + B*u_now;
 end
 
