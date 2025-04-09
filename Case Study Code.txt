@@ -1,0 +1,219 @@
+clear; clc; close all;
+load('m4_model.mat', 'A', 'B', 'C');  
+load('fe.mat', 'ele', 'EXforce');    
+
+D = 0;
+%% noise
+Fs = 50;          
+T  = 5000;        
+dt = 1/Fs;
+tp  = 0:dt:(T - dt);
+
+Tp1        = 1.2;                       
+f0        = 1/Tp1;                     
+N_cycle   = floor(T / Tp1);           
+maxAmplitude =50;                    
+
+
+t_amp = linspace(0, T, N_cycle+1);    
+A_rand = maxAmplitude * rand(N_cycle+1, 1);
+
+
+A_t = interp1(t_amp, A_rand, tp, 'pchip');
+
+
+phi0 = 0; 
+tq = A_t .* sin(2*pi*f0*tp + phi0);
+%% getting excitation force
+figure;
+plot(tp, tq, 'LineWidth', 0.5);
+xlabel('Time (s)');
+ylabel('Amplitude');
+title('Niose');
+grid on;
+
+T_total = 800;
+dt      = 0.02;
+t       = 0:dt:T_total;
+N       = length(t);
+x = zeros(size(A,1),1);
+y = zeros(N,4);
+
+for k = 1:(T_total/dt)   
+   u_now = [
+        tq(k);                
+        tq(k);                 
+        EXforce(k,1);          
+        EXforce(k,2);
+        EXforce(k,3);
+        EXforce(k,4);
+        EXforce(k,5)           
+    ];
+out = C*x;
+y(k,:) = out';
+x = A*x + B*u_now;
+
+end
+
+figure;   
+plot(t, y(:,3),'LineWidth',0.5); 
+grid on; 
+xlabel('Time (s)'); ylabel('Displacement 1');
+title('Displacement 1');
+
+figure;    
+plot(t, y(:,4),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Displacement 2');
+title('Displacement 2');
+
+figure;    
+plot(t, y(:,1),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 1');
+title('Velocity 1');
+
+figure;    
+plot(t, y(:,2),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 2');
+title('Velocity 2');
+
+
+%%idmodel excitation force
+Y = y(:,1:2);
+U = [tq(1:N)', tq(1:N)', EXforce(1:N,1:5)];
+data_id = iddata(Y, U, dt);
+
+sys_est1 = n4sid(data_id, 15, ...
+           'DisturbanceModel','none');
+disp(sys_est1);
+figure; compare(data_id, sys_est1);
+
+
+%%idmodel wave elevation
+if isfile('realid35.mat')
+    % If so, just load it
+    load('realid35.mat','Ad','Bd','Cd','Dd','dt');
+    disp('Loaded system data from realid.mat');
+else
+Y = y(:,1:2);
+U = [tq(1:N)', tq(1:N)',ele(1:N)];
+data_id = iddata(Y, U, dt);
+sys_est2 = n4sid(data_id, 10, ...
+           'DisturbanceModel','none');
+disp(sys_est2);
+figure; compare(data_id, sys_est2);
+
+%%identified system
+Ad = sys_est2.A; 
+Bd = sys_est2.B; 
+Cd = sys_est2.C; 
+Dd = sys_est2.D;
+dt = sys_est2.Ts; 
+
+save('realid.mat','Ad','Bd','Cd','Dd','dt');
+end
+
+nx = size(Ad,1);
+
+
+C_PTO = 10; 
+
+x_id   = zeros(nx,1); 
+v_id   = zeros(N,2);
+f_PTO  = zeros(N,2); 
+
+for k = 1:(T_total/dt)   
+    v_current = Cd*x_id;    
+    v_id(k,:) = v_current'; 
+    f_PTO(k,1) = -C_PTO * v_current(1);
+    f_PTO(k,2) = -C_PTO * v_current(2);
+
+    u_k = [f_PTO(k,1); 
+           f_PTO(k,2); 
+           ele(k)];
+        x_id = Ad*x_id + Bd*u_k;
+end
+
+figure;    
+plot(t, v_id(:,1),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 1');
+title('Identified velocity 1');
+figure;    
+plot(t, v_id(:,2),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 1');
+title('Identified velocity 2');
+
+figure('Name','PTO forces','Color','w');
+plot(t, f_PTO(:,1), 'b-', t, f_PTO(:,2), 'r-');
+grid on;
+xlabel('Time (s)'); ylabel('PTO Force');
+legend('PTO1','PTO2','Location','best');
+title('PTO Input = -10 × velocity');
+
+%verify system
+x1 = zeros(size(A,1),1); 
+y1 = zeros(N,4);
+
+for k = 1:N
+    out = C*x1;           % out = [v1; v2; d1; d2] (4×1)
+    y1(k,:) = out';     
+
+
+    v1 = out(1);
+    v2 = out(2);
+
+  
+    PTO_1 = -10 * v1;
+    PTO_2 = -10 * v2;
+
+    u_now = [
+       PTO_1;                
+       PTO_2;
+       EXforce(k,1);
+       EXforce(k,2);
+       EXforce(k,3);
+       EXforce(k,4);
+       EXforce(k,5)
+    ];
+
+    % 更新状态：x(k+1) = A*x(k) + B*u(k)
+    x1 = A*x1 + B*u_now;
+end
+
+figure;    
+plot(t, y1(:,1),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 1');
+title('v_Velocity 1');
+
+figure;    
+plot(t, y1(:,2),'LineWidth',0.5);
+grid on;
+xlabel('Time (s)'); ylabel('Velocity 2');
+title('v_Velocity 2');
+
+
+figure;
+plot(t, v_id(:,1), 'LineWidth', 0.5);   % Identified velocity
+hold on;
+plot(t, y1(:,1),  'LineWidth', 0.5);   % Simulation velocity
+hold off;
+grid on;
+xlabel('Time (s)');
+ylabel('Velocity 1');
+title('Comparison of Identified vs. Simulated Velocity');
+legend('Identified velocity', 'Simulated velocity','Location','Best');
+
+err = v_id(:,1) - y1(:,1);
+rmse = sqrt(mean(err.^2));
+
+
+v_id_mean = mean(v_id(:,1));
+fit_percent = (1 - norm(err) / norm(v_id(:,1) - v_id_mean)) * 100;
+
+fprintf('RMSE: %.4f\n', rmse);
+fprintf('Fit Percentage: %.2f%%\n', fit_percent);

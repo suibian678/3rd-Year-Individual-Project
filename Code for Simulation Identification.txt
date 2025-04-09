@@ -1,0 +1,377 @@
+ clear; clc; close all;
+ 
+ 
+% Check if the wave file already exists (change the numbers of the wave file)
+if isfile('irregularWave1.mat')
+    % If so, just load it
+    load('irregularWave1.mat','t','eta');
+    disp('Loaded wave data from irregularWave.mat');
+else
+    % Otherwise, generate once and save
+    disp('Generating a new irregular wave ...');
+    
+    % Fixing or removing the random seed ensures consistent wave,
+    rng('shuffle'); 
+    
+    %% Generate Irregular Wave (JONSWAP)
+    Hs = 4;  
+    Tp = 30;  
+    gamma = 3.3;
+
+    df   = 1/1000;  
+    fmax = 1;       
+    f    = df:df:fmax;
+
+    g   = 9.81;   
+    f_p = 1/Tp;
+
+    sigma = 0.07*(f <= f_p) + 0.09*(f > f_p);
+    alpha = 0.076*(Hs^2/(g*Tp^4))^0.22;
+
+    S = alpha*(g^2./f.^5).*exp(-5/4*(f/f_p).^-4).* ...
+        gamma.^(exp(-((f - f_p).^2)./(2*sigma.^2*f_p^2)));
+
+    amplitude = sqrt(2*S*df);
+
+    T_total = 500;
+    dt      = 0.02;
+    t       = 0:dt:T_total;
+
+    % Random phases
+    phi = 2*pi*rand(size(f));  
+
+    eta = zeros(size(t));
+    for i = 1:length(f)
+        eta = eta + amplitude(i)*cos(2*pi*f(i)*t + phi(i));
+    end
+
+    eta = eta / max(abs(eta)) * Hs;
+
+    % Save this wave so we can reuse it next run
+    save('irregularWave3.mat','t','eta');
+    disp('Saved wave data to irregularWave.mat');
+end
+
+disp(['Peak wave elevation: ',   num2str(max(eta))]);
+disp(['Trough wave elevation: ', num2str(min(eta))]);
+
+figure('Name','Irregular Wave','Color','w');
+plot(t, eta, 'b','LineWidth', 1.5); grid on;
+xlabel('Time (s)'); ylabel('Wave Elevation (m)');
+title('Irregular Wave');
+
+%% State-Space Model (Original Heave)
+M     = 242;     
+m_inf = 83.5;     
+K     = 3775;   
+C_PTO = 35;        
+rho   = 1000;     
+g     = 9.81;     
+S_wp  = 0.3848;    
+
+a = -(M + m_inf);
+b = rho*g*S_wp;
+
+A_p = [0  0  -17.9;
+       1  0  -17.7;
+       0  1   -4.41];
+B_p = [36.5;394;75.1];
+C_p = [0 0 1];
+D_p = 0;
+
+A = [ 0  0 -17.9  0  36.5;
+      1  0 -17.7  0  394;
+      0  1  -4.41 0  75.1;
+      0  0   0    0  1;
+      C_p/a b/a   0   ];
+B = [0;0;0;0; -1/a];
+C = [0 0 0 0 1];
+D = 0;
+
+    T_total = 500;
+    dt      = 0.02;
+    t       = 0:dt:T_total;
+sys_heave  = ss(A,B,C,D);
+sys_heave_d = c2d(sys_heave, dt, 'zoh');
+
+% Excitation Force
+Af = [0 0 0 0 -409; 
+      1 0 0 0 -459; 
+      0 1 0 0 -226; 
+      0 0 1 0  -64; 
+      0 0 0 1  -9.96];
+Bf = [1.549866e6; -116380; 24748; -644; 19.3];
+Cf = [0 0 0 0 1];
+Df = 0;
+
+sys_exc_cont = ss(Af, Bf, Cf, Df);
+sys_exc_disc = c2d(sys_exc_cont, dt, 'zoh');
+[fe_output, ~, ~] = lsim(sys_exc_disc, eta, t);
+
+%[v1, ~, x] = lsim(sys_heave_d, fe_output, t);
+%v = x(:,5);
+%figure;
+%plot(t,z,'r'); grid on;
+%xlabel('Time (s)'); ylabel('Displacement (m)');
+%title('Heave Displacement');
+
+%figure;
+%plot(t,v1,'b'); grid on;
+%xlabel('Time (s)'); ylabel('Velocity (m/s)');
+%title('Velocity');
+
+%% noise
+Fs = 50;          %(Hz)
+T  = 5000;        %(s)
+dt = 1/Fs;
+tp  = 0:dt:(T - dt);
+
+Tp1        = 10;                       
+f0        = 1/Tp1;                     
+N_cycle   = floor(T / Tp1);           
+maxAmplitude = 35;                    
+
+t_amp = linspace(0, T, N_cycle+1);    
+A_rand = maxAmplitude * rand(N_cycle+1, 1);
+
+A_t = interp1(t_amp, A_rand, tp, 'pchip');
+phi0 = 0;
+y = A_t .* sin(2*pi*f0*tp + phi0);
+
+
+%figure;
+%plot(tp, y, 'LineWidth', 1);
+%xlabel('Time (s)');
+%ylabel('Amplitude');
+%title('Noise');
+%grid on;
+
+A_know = [
+  % row1: dot{x1} = x2
+   0       1       0       0       0       0       0       0       0       0
+  % row2: dot{x2} = alpha*[ Cf x_f(5) + f_PTO - C_r x_p(3) - K x_1 ]
+  -11.597   0       0       0       0       0       0.00307 0       0      -0.00307
+  % row3..7 => Excitation Af
+   0       0       0       0       0       0      -409     0       0       0
+   0       0       1       0       0       0      -459     0       0       0
+   0       0       0       1       0       0      -226     0       0       0
+   0       0       0       0       1       0      -64      0       0       0
+   0       0       0       0       0       1      -9.96    0       0       0
+  % row8..10 => Radiation A_p
+   0       36.5       0       0       0       0       0       0       0      -17.9
+   0       394       0       0       0       0       0       1       0      -17.7
+   0       75.1       0       0       0       0       0       0       1      -4.41
+];
+
+B_know = [
+  0       0         % row1 
+  0       0.00307   % row2 => alpha * f_PTO
+  1.549866e6  0     % row3 => B_f(1)
+ -116380     0       % row4 => B_f(2)
+  24748      0       % row5 => B_f(3)
+  -644       0       % row6 => B_f(4)
+  19.3       0       % row7 => B_f(5)
+  0          0       % row8 => no direct input
+  0          0       % row9
+  0          0       % row10
+];
+C_know = [0 1 0 0 0 0 0 0 0 0];
+D_know = [0 0];
+
+sysC = ss(A_know, B_know, C_know, D_know);
+sysD = c2d(sysC, dt, 'zoh');
+
+
+%train
+Ad = sysD.A; Bd = sysD.B; Cd = sysD.C; Dd = sysD.D;
+N = length(t);
+x_know = zeros(size(A_know,1),1);
+v_know = zeros(N,1);
+
+for k = 1:(T_total/dt)   
+    uk0 = [eta(k); y(k)];
+    v_know(k) = Cd*x_know + Dd*uk0;  
+    x_know = Ad*x_know + Bd*uk0;
+    
+end
+
+z_know = cumtrapz(t, v_know);
+
+
+figure('Name','Known Trained Data','Color','w');
+plot(t, v_know,  'b-');
+grid on;
+xlabel('Time (s)'); ylabel('Velocity (m/s)');
+legend('Trained Output','Location','best');
+title('Velocity Trained');
+
+figure('Name','Wave Elevation and Heave Displacement','Color','w');
+plot(t, eta, 'b', 'LineWidth', 1.5);  % Wave Elevation (Blue)
+hold on;
+plot(t, z_know, 'r', 'LineWidth', 1.5);  % Heave Displacement (Red)
+hold off;
+
+grid on;
+xlabel('Time (s)');
+ylabel('Elevation / Displacement (m)');
+title('Wave Elevation and Heave Displacement');
+legend('Wave Elevation', 'Heave Displacement', 'Location', 'best');
+
+%verify
+x_verify = zeros(size(Ad,1),1);
+v_verify = zeros(N,1);
+
+for k = 1:(T_total/dt)
+    f_PTO = -C_PTO*v_verify;
+    uk = [eta(k); f_PTO(k);];   
+    v_verify(k) = Cd*x_verify; 
+    x_verify = Ad*x_verify + Bd*uk;
+end
+
+figure('Name','PTO','Color','w');
+plot(t, f_PTO,  'b-');
+grid on;
+xlabel('Time (s)'); ylabel('Force (N)');
+title('PTO Force');
+
+figure('Name','Known Data','Color','w');
+plot(t, v_verify,  'b-');
+grid on;
+xlabel('Time (s)'); ylabel('Velocity (m/s)');
+legend('Verified Output','Location','best');
+title('Velocity used for Verification');
+
+%% Blackbox System Identification
+% Two inputs: wave elevation eta, noise
+% One output: velocity v
+
+% Ensure consistent data length
+min_length = min(length(eta), length(y));  % Find the shorter length
+eta_fixed = eta(1:min_length);  % Trim eta to match min_length
+y_fixed = y(1:min_length);      % Trim y to match min_length
+v_fixed = v_know(1:min_length); % Trim v_know
+
+input_data = [eta_fixed; y_fixed]';  % Transpose to match expected format
+output_data = v_fixed; % Ensure output matches input size
+
+
+% Define time parameters
+T_total = 500;
+dt      = 0.02;
+t       = 0:dt:T_total;
+N       = length(t);
+
+% Ensure data lengths match expected sizes
+if size(input_data,1) ~= N || length(output_data) ~= N
+    error('Mismatch in data lengths. Ensure consistent wave and velocity data.');
+end
+
+  % Split dataset into 70% training and 30% validation
+split_ratio = 0.70;
+split_index = round(split_ratio * N);
+
+ if split_index < 1 || split_index >= N
+        error('Invalid split index. Check dataset size.');
+ end
+
+% Always ensure training and validation sets exist
+input_train  = input_data(1:split_index,:);
+output_train = output_data(1:split_index);
+t_train      = t(1:split_index);
+
+input_val    = input_data(split_index+1:end,:);
+output_val   = output_data(split_index+1:end);
+t_val        = t(split_index+1:end);
+
+%% Single-Order Approach
+order_single = 8;                                      %change here
+
+% Load or retrain the identified system
+if exist('identified_system8.mat', 'file')             %change here
+    load('identified_system8.mat', 'sys_id_');        %change here
+    fprintf('Loaded previously identified system.\n');
+else
+    % Create IDDATA object
+    data_train = iddata(output_train, input_train, dt);
+
+    % System Identification using N4SID
+    rng(42,'twister');
+    sys_id_ = n4sid(data_train, order_single, ...
+        'DisturbanceModel','none', ...    % K=0
+        'Focus','simulation', ...
+        'InitialState','zero');
+
+    % Save the identified system for future use
+    save('identified_system8.mat', 'sys_id_');        %change here
+    fprintf('Identified system saved for future use.\n');
+end
+% **Ensure `input_val` is defined
+if exist('input_val', 'var') == 0
+    error('input_val is not defined. Check that the data splitting step was successful.');
+end
+%% Validation (30% Data)
+[model_output_val, ~] = lsim(sys_id_, input_val, t_val);
+num_val = norm(output_val - model_output_val);
+den_val = norm(output_val - mean(output_val));
+fit_val_70 = max(0, 100 * (1 - num_val/den_val));
+
+fprintf('\n[SINGLE ORDER - n4sid] Validation Fit (70->30) (Order %d): %.3f%%\n', ...
+   order_single, fit_val_70);
+
+figure('Name','n4sid Validation(30%)','Color','w');
+plot(t_val, output_val, 'b', 'LineWidth', 1.5); hold on;
+plot(t_val, model_output_val, 'r--', 'LineWidth', 1.5);
+grid on; legend('Measured', 'Model', 'Location', 'best');
+xlabel('Time (s)'); ylabel('Output');
+title(sprintf('n4sid(Order=%d) Validation Fit=%.2f%%', order_single, fit_val_70));
+
+%% Full Data Fit
+[model_output_full, ~] = lsim(sys_id_, input_data, t);
+num_full = norm(output_data - model_output_full);
+den_full = norm(output_data - mean(output_data));
+fit_val_100 = max(0, 100 * (1 - num_full/den_full));
+
+fprintf('Overall Fit on Entire Data (Order %d): %.3f%%\n', ...
+   order_single, fit_val_100);
+
+figure('Name','n4sid FullData','Color','w');
+plot(t, output_data, 'b', 'LineWidth', 1.2); hold on;
+plot(t, model_output_full, 'r--', 'LineWidth', 1.2);
+grid on; legend('Simulated', 'Identified', 'Location', 'best');
+xlabel('Time (s)'); ylabel('Output');
+title(sprintf('（Order=%d) Fit of Identified System and Simulated System %.2f%%', order_single, fit_val_100));
+
+
+%% validation with similiar control stradegy
+x_id = zeros(size(sys_id_.A,1),1);
+v_id = zeros(N,1);
+
+for k = 1:(T_total/dt)
+
+    f_PTO1 = -C_PTO*v_id;
+    u_id = [eta(k); f_PTO1(k)';];
+    v_id(k) = sys_id_.C*x_id;
+    x_id = sys_id_.A*x_id + sys_id_.B*u_id;
+
+end
+
+figure('Name','identified Data','Color','w');
+plot(t, v_id,  'b-');
+grid on;
+xlabel('Time (s)'); ylabel('Velocity (m/s)');
+legend('Identified Output','Location','best');
+title('Identified Velocity Under Same Control Strategy');
+
+
+num_full1 = norm(v_verify - v_id);
+den_full1 = norm(v_verify - mean(v_verify));
+fit_val = max(0,100*(1 - num_full1/den_full1));
+
+fprintf('Fit on Validation Data (Order %d): %.3f%%\n',...
+   order_single, fit_val);
+figure('Name','n4sid FullData','Color','w');
+plot(t, v_verify,'b','LineWidth',1.2); hold on;
+plot(t, v_id,'r--','LineWidth',1.2);
+grid on; legend('v verify','v identified','Location','best');
+xlabel('Time (s)'); ylabel('Output');
+title(sprintf('Compared Between Verify and Identified Velocity Fit=%.2f%%',fit_val));
